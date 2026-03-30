@@ -595,6 +595,71 @@
   white-space: nowrap;
 }
 
+.credentialNameBlock {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.breakdownToggle {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--primary-color);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+
+  &:hover {
+    text-decoration: underline;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+    border-radius: $radius-sm;
+  }
+}
+
+.breakdownCell {
+  padding: 0 !important;
+  background: var(--bg-secondary);
+}
+
+.breakdownSection {
+  padding: 12px;
+}
+
+.breakdownTitle {
+  margin-bottom: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.breakdownTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+
+  th,
+  td {
+    padding: 8px 10px;
+    text-align: left;
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  th {
+    color: var(--text-tertiary);
+    background: var(--bg-primary);
+  }
+
+  tbody tr:hover {
+    background: var(--bg-tertiary);
+  }
+}
+
 // Pricing Section (80%比例)
 .pricingSection {
   display: flex;

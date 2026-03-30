@@ -1,27 +1,42 @@
-import { useMemo, useState, useEffect } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card } from '@/components/ui/Card';
+import type { GeminiKeyConfig, OpenAIProviderConfig, ProviderKeyConfig } from '@/types';
 import {
-  collectUsageDetails,
   buildCandidateUsageSourceIds,
+  calculateCost,
+  collectUsageDetails,
+  extractTotalTokens,
   formatCompactNumber,
-  normalizeAuthIndex
+  formatUsd,
+  normalizeAuthIndex,
+  type ModelPrice,
+  type UsageDetail,
 } from '@/utils/usage';
 import { authFilesApi } from '@/services/api/authFiles';
-import type { GeminiKeyConfig, ProviderKeyConfig, OpenAIProviderConfig } from '@/types';
 import type { AuthFileItem } from '@/types/authFile';
 import type { CredentialInfo } from '@/types/sourceInfo';
-import type { UsagePayload } from './hooks/useUsageData';
 import styles from '@/pages/UsagePage.module.scss';
 
 export interface CredentialStatsCardProps {
-  usage: UsagePayload | null;
+  usage: unknown;
   loading: boolean;
+  modelPrices: Record<string, ModelPrice>;
   geminiKeys: GeminiKeyConfig[];
   claudeConfigs: ProviderKeyConfig[];
   codexConfigs: ProviderKeyConfig[];
   vertexConfigs: ProviderKeyConfig[];
   openaiProviders: OpenAIProviderConfig[];
+}
+
+interface ModelBreakdownRow {
+  model: string;
+  success: number;
+  failure: number;
+  total: number;
+  successRate: number;
+  totalTokens: number;
+  cost: number;
 }
 
 interface CredentialRow {
@@ -32,16 +47,115 @@ interface CredentialRow {
   failure: number;
   total: number;
   successRate: number;
+  totalTokens: number;
+  cost: number;
+  models: ModelBreakdownRow[];
 }
 
-interface CredentialBucket {
+interface AggregateBucket {
   success: number;
   failure: number;
+  totalTokens: number;
+  cost: number;
+  models: Map<string, ModelBreakdownRow>;
 }
+
+const createBucket = (): AggregateBucket => ({
+  success: 0,
+  failure: 0,
+  totalTokens: 0,
+  cost: 0,
+  models: new Map<string, ModelBreakdownRow>(),
+});
+
+const appendDetailToBucket = (
+  bucket: AggregateBucket,
+  detail: UsageDetail,
+  modelPrices: Record<string, ModelPrice>
+) => {
+  const isFailed = detail.failed === true;
+  const totalTokens = extractTotalTokens(detail);
+  const cost = calculateCost(detail, modelPrices);
+  const modelName = String(detail.__modelName ?? '').trim() || '-';
+  const modelBucket = bucket.models.get(modelName) ?? {
+    model: modelName,
+    success: 0,
+    failure: 0,
+    total: 0,
+    successRate: 100,
+    totalTokens: 0,
+    cost: 0,
+  };
+
+  if (isFailed) {
+    bucket.failure += 1;
+    modelBucket.failure += 1;
+  } else {
+    bucket.success += 1;
+    modelBucket.success += 1;
+  }
+
+  bucket.totalTokens += totalTokens;
+  bucket.cost += cost;
+  modelBucket.totalTokens += totalTokens;
+  modelBucket.cost += cost;
+  modelBucket.total = modelBucket.success + modelBucket.failure;
+  modelBucket.successRate = modelBucket.total > 0 ? (modelBucket.success / modelBucket.total) * 100 : 100;
+  bucket.models.set(modelName, modelBucket);
+};
+
+const mergeBucket = (target: AggregateBucket, bucket: AggregateBucket) => {
+  target.success += bucket.success;
+  target.failure += bucket.failure;
+  target.totalTokens += bucket.totalTokens;
+  target.cost += bucket.cost;
+
+  bucket.models.forEach((modelBucket, modelName) => {
+    const existing = target.models.get(modelName) ?? {
+      model: modelName,
+      success: 0,
+      failure: 0,
+      total: 0,
+      successRate: 100,
+      totalTokens: 0,
+      cost: 0,
+    };
+
+    existing.success += modelBucket.success;
+    existing.failure += modelBucket.failure;
+    existing.totalTokens += modelBucket.totalTokens;
+    existing.cost += modelBucket.cost;
+    existing.total = existing.success + existing.failure;
+    existing.successRate = existing.total > 0 ? (existing.success / existing.total) * 100 : 100;
+    target.models.set(modelName, existing);
+  });
+};
+
+const bucketToRow = (
+  key: string,
+  displayName: string,
+  type: string,
+  bucket: AggregateBucket
+): CredentialRow => {
+  const total = bucket.success + bucket.failure;
+  return {
+    key,
+    displayName,
+    type,
+    success: bucket.success,
+    failure: bucket.failure,
+    total,
+    successRate: total > 0 ? (bucket.success / total) * 100 : 100,
+    totalTokens: bucket.totalTokens,
+    cost: bucket.cost,
+    models: Array.from(bucket.models.values()).sort((a, b) => b.total - a.total),
+  };
+};
 
 export function CredentialStatsCard({
   usage,
   loading,
+  modelPrices,
   geminiKeys,
   claudeConfigs,
   codexConfigs,
@@ -50,8 +164,8 @@ export function CredentialStatsCard({
 }: CredentialStatsCardProps) {
   const { t } = useTranslation();
   const [authFileMap, setAuthFileMap] = useState<Map<string, CredentialInfo>>(new Map());
+  const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
 
-  // Fetch auth files for auth_index-based matching
   useEffect(() => {
     let cancelled = false;
     authFilesApi
@@ -64,56 +178,47 @@ export function CredentialStatsCard({
         files.forEach((file) => {
           const rawAuthIndex = file['auth_index'] ?? file.authIndex;
           const key = normalizeAuthIndex(rawAuthIndex);
-          if (key) {
-            map.set(key, {
-              name: file.name || key,
-              type: (file.type || file.provider || '').toString(),
-            });
-          }
+          if (!key) return;
+          map.set(key, {
+            name: file.name || key,
+            type: (file.type || file.provider || '').toString(),
+          });
         });
         setAuthFileMap(map);
       })
       .catch(() => {});
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  // Aggregate rows: all from bySource only (no separate byAuthIndex rows to avoid duplicates).
-  // Auth files are used purely for name resolution of unmatched source IDs.
   const rows = useMemo((): CredentialRow[] => {
     if (!usage) return [];
+
     const details = collectUsageDetails(usage);
-    const bySource: Record<string, CredentialBucket> = {};
+    const bySource = new Map<string, AggregateBucket>();
     const result: CredentialRow[] = [];
     const consumedSourceIds = new Set<string>();
     const authIndexToRowIndex = new Map<string, number>();
     const sourceToAuthIndex = new Map<string, string>();
     const sourceToAuthFile = new Map<string, CredentialInfo>();
-    const fallbackByAuthIndex = new Map<string, CredentialBucket>();
+    const fallbackByAuthIndex = new Map<string, AggregateBucket>();
 
     details.forEach((detail) => {
       const authIdx = normalizeAuthIndex(detail.auth_index);
       const source = detail.source;
-      const isFailed = detail.failed === true;
 
       if (!source) {
         if (!authIdx) return;
-        const fallback = fallbackByAuthIndex.get(authIdx) ?? { success: 0, failure: 0 };
-        if (isFailed) {
-          fallback.failure += 1;
-        } else {
-          fallback.success += 1;
-        }
+        const fallback = fallbackByAuthIndex.get(authIdx) ?? createBucket();
+        appendDetailToBucket(fallback, detail, modelPrices);
         fallbackByAuthIndex.set(authIdx, fallback);
         return;
       }
 
-      const bucket = bySource[source] ?? { success: 0, failure: 0 };
-      if (isFailed) {
-        bucket.failure += 1;
-      } else {
-        bucket.success += 1;
-      }
-      bySource[source] = bucket;
+      const bucket = bySource.get(source) ?? createBucket();
+      appendDetailToBucket(bucket, detail, modelPrices);
+      bySource.set(source, bucket);
 
       if (authIdx && !sourceToAuthIndex.has(source)) {
         sourceToAuthIndex.set(source, authIdx);
@@ -124,107 +229,93 @@ export function CredentialStatsCard({
       }
     });
 
-    const mergeBucketToRow = (index: number, bucket: CredentialBucket) => {
+    const mergeBucketToRow = (index: number, bucket: AggregateBucket) => {
       const target = result[index];
       if (!target) return;
-      target.success += bucket.success;
-      target.failure += bucket.failure;
-      target.total = target.success + target.failure;
-      target.successRate = target.total > 0 ? (target.success / target.total) * 100 : 100;
+      const aggregate = createBucket();
+      mergeBucket(aggregate, {
+        success: target.success,
+        failure: target.failure,
+        totalTokens: target.totalTokens,
+        cost: target.cost,
+        models: new Map(target.models.map((model) => [model.model, { ...model }])),
+      });
+      mergeBucket(aggregate, bucket);
+      result[index] = bucketToRow(target.key, target.displayName, target.type, aggregate);
     };
 
-    // Aggregate all candidate source IDs for one provider config into a single row
     const addConfigRow = (
-      apiKey: string,
-      prefix: string | undefined,
+      candidates: Iterable<string>,
       name: string,
       type: string,
       rowKey: string,
     ) => {
-      const candidates = buildCandidateUsageSourceIds({ apiKey, prefix });
-      let success = 0;
-      let failure = 0;
-      candidates.forEach((id) => {
-        const bucket = bySource[id];
-        if (bucket) {
-          success += bucket.success;
-          failure += bucket.failure;
-          consumedSourceIds.add(id);
-        }
-      });
-      const total = success + failure;
+      const aggregate = createBucket();
+      for (const id of candidates) {
+        const bucket = bySource.get(id);
+        if (!bucket) continue;
+        mergeBucket(aggregate, bucket);
+        consumedSourceIds.add(id);
+      }
+      const total = aggregate.success + aggregate.failure;
       if (total > 0) {
-        result.push({
-          key: rowKey,
-          displayName: name,
-          type,
-          success,
-          failure,
-          total,
-          successRate: (success / total) * 100,
-        });
+        result.push(bucketToRow(rowKey, name, type, aggregate));
       }
     };
 
-    // Provider rows — one row per config, stats merged across all its candidate source IDs
     geminiKeys.forEach((c, i) =>
-      addConfigRow(c.apiKey, c.prefix, c.prefix?.trim() || `Gemini #${i + 1}`, 'gemini', `gemini:${i}`));
+      addConfigRow(
+        buildCandidateUsageSourceIds({ apiKey: c.apiKey, prefix: c.prefix }),
+        c.prefix?.trim() || `Gemini #${i + 1}`,
+        'gemini',
+        `gemini:${i}`
+      ));
     claudeConfigs.forEach((c, i) =>
-      addConfigRow(c.apiKey, c.prefix, c.prefix?.trim() || `Claude #${i + 1}`, 'claude', `claude:${i}`));
+      addConfigRow(
+        buildCandidateUsageSourceIds({ apiKey: c.apiKey, prefix: c.prefix }),
+        c.prefix?.trim() || `Claude #${i + 1}`,
+        'claude',
+        `claude:${i}`
+      ));
     codexConfigs.forEach((c, i) =>
-      addConfigRow(c.apiKey, c.prefix, c.prefix?.trim() || `Codex #${i + 1}`, 'codex', `codex:${i}`));
+      addConfigRow(
+        buildCandidateUsageSourceIds({ apiKey: c.apiKey, prefix: c.prefix }),
+        c.prefix?.trim() || `Codex #${i + 1}`,
+        'codex',
+        `codex:${i}`
+      ));
     vertexConfigs.forEach((c, i) =>
-      addConfigRow(c.apiKey, c.prefix, c.prefix?.trim() || `Vertex #${i + 1}`, 'vertex', `vertex:${i}`));
-    // OpenAI compatibility providers — one row per provider, merged across all apiKey entries (prefix counted once).
-    openaiProviders.forEach((provider, providerIndex) => {
-      const prefix = provider.prefix;
-      const displayName = prefix?.trim() || provider.name || `OpenAI #${providerIndex + 1}`;
+      addConfigRow(
+        buildCandidateUsageSourceIds({ apiKey: c.apiKey, prefix: c.prefix }),
+        c.prefix?.trim() || `Vertex #${i + 1}`,
+        'vertex',
+        `vertex:${i}`
+      ));
 
+    openaiProviders.forEach((provider, providerIndex) => {
       const candidates = new Set<string>();
-      buildCandidateUsageSourceIds({ prefix }).forEach((id) => candidates.add(id));
+      buildCandidateUsageSourceIds({ prefix: provider.prefix }).forEach((id) => candidates.add(id));
       (provider.apiKeyEntries || []).forEach((entry) => {
         buildCandidateUsageSourceIds({ apiKey: entry.apiKey }).forEach((id) => candidates.add(id));
       });
 
-      let success = 0;
-      let failure = 0;
-      candidates.forEach((id) => {
-        const bucket = bySource[id];
-        if (bucket) {
-          success += bucket.success;
-          failure += bucket.failure;
-          consumedSourceIds.add(id);
-        }
-      });
-
-      const total = success + failure;
-      if (total > 0) {
-        result.push({
-          key: `openai:${providerIndex}`,
-          displayName,
-          type: 'openai',
-          success,
-          failure,
-          total,
-          successRate: (success / total) * 100,
-        });
-      }
+      addConfigRow(
+        candidates,
+        provider.prefix?.trim() || provider.name || `OpenAI #${providerIndex + 1}`,
+        'openai',
+        `openai:${providerIndex}`
+      );
     });
 
-    // Remaining unmatched bySource entries — resolve name from auth files if possible
-    Object.entries(bySource).forEach(([key, bucket]) => {
+    bySource.forEach((bucket, key) => {
       if (consumedSourceIds.has(key)) return;
-      const total = bucket.success + bucket.failure;
       const authFile = sourceToAuthFile.get(key);
-      const row = {
+      const row = bucketToRow(
         key,
-        displayName: authFile?.name || (key.startsWith('t:') ? key.slice(2) : key),
-        type: authFile?.type || '',
-        success: bucket.success,
-        failure: bucket.failure,
-        total,
-        successRate: total > 0 ? (bucket.success / total) * 100 : 100,
-      };
+        authFile?.name || (key.startsWith('t:') ? key.slice(2) : key),
+        authFile?.type || '',
+        bucket
+      );
       const rowIndex = result.push(row) - 1;
       const authIdx = sourceToAuthIndex.get(key);
       if (authIdx && !authIndexToRowIndex.has(authIdx)) {
@@ -232,7 +323,6 @@ export function CredentialStatsCard({
       }
     });
 
-    // Include requests that have auth_index but missing source.
     fallbackByAuthIndex.forEach((bucket, authIdx) => {
       if (bucket.success + bucket.failure === 0) return;
 
@@ -253,21 +343,21 @@ export function CredentialStatsCard({
         return;
       }
 
-      const total = bucket.success + bucket.failure;
-      const rowIndex = result.push({
-        key: `auth:${authIdx}`,
-        displayName: mapped?.name || authIdx,
-        type: mapped?.type || '',
-        success: bucket.success,
-        failure: bucket.failure,
-        total,
-        successRate: (bucket.success / total) * 100
-      }) - 1;
+      const rowIndex = result.push(
+        bucketToRow(`auth:${authIdx}`, mapped?.name || authIdx, mapped?.type || '', bucket)
+      ) - 1;
       authIndexToRowIndex.set(authIdx, rowIndex);
     });
 
     return result.sort((a, b) => b.total - a.total);
-  }, [usage, geminiKeys, claudeConfigs, codexConfigs, vertexConfigs, openaiProviders, authFileMap]);
+  }, [usage, modelPrices, geminiKeys, claudeConfigs, codexConfigs, vertexConfigs, openaiProviders, authFileMap]);
+
+  const toggleExpanded = (key: string) => {
+    setExpandedRows((current) => ({
+      ...current,
+      [key]: !current[key],
+    }));
+  };
 
   return (
     <Card title={t('usage_stats.credential_stats')} className={styles.detailsFixedCard}>
@@ -275,51 +365,137 @@ export function CredentialStatsCard({
         <div className={styles.hint}>{t('common.loading')}</div>
       ) : rows.length > 0 ? (
         <div className={styles.detailsScroll}>
-        <div className={styles.tableWrapper}>
-          <table className={styles.table}>
-            <thead>
-              <tr>
-                <th>{t('usage_stats.credential_name')}</th>
-                <th>{t('usage_stats.requests_count')}</th>
-                <th>{t('usage_stats.success_rate')}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => (
-                <tr key={row.key}>
-                  <td className={styles.modelCell}>
-                    <span>{row.displayName}</span>
-                    {row.type && (
-                      <span className={styles.credentialType}>{row.type}</span>
-                    )}
-                  </td>
-                  <td>
-                    <span className={styles.requestCountCell}>
-                      <span>{formatCompactNumber(row.total)}</span>
-                      <span className={styles.requestBreakdown}>
-                        (<span className={styles.statSuccess}>{row.success.toLocaleString()}</span>{' '}
-                        <span className={styles.statFailure}>{row.failure.toLocaleString()}</span>)
-                      </span>
-                    </span>
-                  </td>
-                  <td>
-                    <span
-                      className={
-                        row.successRate >= 95
-                          ? styles.statSuccess
-                          : row.successRate >= 80
-                            ? styles.statNeutral
-                            : styles.statFailure
-                      }
-                    >
-                      {row.successRate.toFixed(1)}%
-                    </span>
-                  </td>
+          <div className={styles.tableWrapper}>
+            <table className={styles.table}>
+              <thead>
+                <tr>
+                  <th>{t('usage_stats.credential_name')}</th>
+                  <th>{t('usage_stats.provider')}</th>
+                  <th>{t('usage_stats.requests_count')}</th>
+                  <th>{t('usage_stats.success_rate')}</th>
+                  <th>{t('usage_stats.total_tokens')}</th>
+                  <th>{t('usage_stats.cost')}</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {rows.map((row) => {
+                  const isExpanded = expandedRows[row.key] === true;
+                  return (
+                    <Fragment key={row.key}>
+                      <tr>
+                        <td className={styles.modelCell}>
+                          <div className={styles.credentialNameBlock}>
+                            <span>{row.displayName}</span>
+                            {row.models.length > 0 && (
+                              <button
+                                type="button"
+                                className={styles.breakdownToggle}
+                                onClick={() => toggleExpanded(row.key)}
+                              >
+                                {isExpanded
+                                  ? t('usage_stats.credential_models_hide')
+                                  : t('usage_stats.credential_models_show', { count: row.models.length })}
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                        <td>
+                          {row.type ? <span className={styles.credentialType}>{row.type}</span> : '-'}
+                        </td>
+                        <td>
+                          <span className={styles.requestCountCell}>
+                            <span>{formatCompactNumber(row.total)}</span>
+                            <span className={styles.requestBreakdown}>
+                              (<span className={styles.statSuccess}>{row.success.toLocaleString()}</span>{' '}
+                              <span className={styles.statFailure}>{row.failure.toLocaleString()}</span>)
+                            </span>
+                          </span>
+                        </td>
+                        <td>
+                          <span
+                            className={
+                              row.successRate >= 95
+                                ? styles.statSuccess
+                                : row.successRate >= 80
+                                  ? styles.statNeutral
+                                  : styles.statFailure
+                            }
+                          >
+                            {row.successRate.toFixed(1)}%
+                          </span>
+                        </td>
+                        <td title={row.totalTokens.toLocaleString()}>{formatCompactNumber(row.totalTokens)}</td>
+                        <td title={formatUsd(row.cost)}>{formatUsd(row.cost)}</td>
+                      </tr>
+                      {isExpanded && row.models.length > 0 && (
+                        <tr>
+                          <td colSpan={6} className={styles.breakdownCell}>
+                            <div className={styles.breakdownSection}>
+                              <div className={styles.breakdownTitle}>
+                                {t('usage_stats.credential_model_breakdown')}
+                              </div>
+                              <div className={styles.tableWrapper}>
+                                <table className={styles.breakdownTable}>
+                                  <thead>
+                                    <tr>
+                                      <th>{t('usage_stats.model_name')}</th>
+                                      <th>{t('usage_stats.requests_count')}</th>
+                                      <th>{t('usage_stats.success_rate')}</th>
+                                      <th>{t('usage_stats.total_tokens')}</th>
+                                      <th>{t('usage_stats.cost')}</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {row.models.map((model) => (
+                                      <tr key={`${row.key}:${model.model}`}>
+                                        <td className={styles.modelCell}>{model.model}</td>
+                                        <td>
+                                          <span className={styles.requestCountCell}>
+                                            <span>{formatCompactNumber(model.total)}</span>
+                                            <span className={styles.requestBreakdown}>
+                                              (
+                                              <span className={styles.statSuccess}>
+                                                {model.success.toLocaleString()}
+                                              </span>{' '}
+                                              <span className={styles.statFailure}>
+                                                {model.failure.toLocaleString()}
+                                              </span>
+                                              )
+                                            </span>
+                                          </span>
+                                        </td>
+                                        <td>
+                                          <span
+                                            className={
+                                              model.successRate >= 95
+                                                ? styles.statSuccess
+                                                : model.successRate >= 80
+                                                  ? styles.statNeutral
+                                                  : styles.statFailure
+                                            }
+                                          >
+                                            {model.successRate.toFixed(1)}%
+                                          </span>
+                                        </td>
+                                        <td title={model.totalTokens.toLocaleString()}>
+                                          {formatCompactNumber(model.totalTokens)}
+                                        </td>
+                                        <td title={formatUsd(model.cost)}>{formatUsd(model.cost)}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
       ) : (
         <div className={styles.hint}>{t('usage_stats.no_data')}</div>

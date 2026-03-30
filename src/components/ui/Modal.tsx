@@ -146,7 +146,7 @@ export function Modal({
     (notifyParent: boolean) => {
       if (closeTimerRef.current !== null) return;
       setIsClosing(true);
-      closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = setTimeout(() => {
         setIsVisible(false);
         setIsClosing(false);
         closeTimerRef.current = null;
@@ -163,7 +163,7 @@ export function Modal({
 
     if (open) {
       if (closeTimerRef.current !== null) {
-        window.clearTimeout(closeTimerRef.current);
+        clearTimeout(closeTimerRef.current);
         closeTimerRef.current = null;
       }
       queueMicrotask(() => {
@@ -190,7 +190,7 @@ export function Modal({
   useEffect(() => {
     return () => {
       if (closeTimerRef.current !== null) {
-        window.clearTimeout(closeTimerRef.current);
+        clearTimeout(closeTimerRef.current);
       }
     };
   }, []);
