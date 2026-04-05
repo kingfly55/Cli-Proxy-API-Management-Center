@@ -400,6 +400,9 @@ export const authFilesApi = {
   setStatus: (name: string, disabled: boolean) =>
     apiClient.patch<AuthFileStatusResponse>('/auth-files/status', { name, disabled }),
 
+  resetQuota: (name: string) =>
+    apiClient.post<{ status: string }>('/auth-files/reset-quota', { name }),
+
   uploadFiles: async (files: File[]): Promise<AuthFileBatchUploadResult> => {
     const requestedNames = files.map((file) => file.name);
     if (requestedNames.length === 0) {

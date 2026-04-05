@@ -30,6 +30,7 @@ export type UseAuthFilesDataResult = {
   deleting: string | null;
   deletingAll: boolean;
   statusUpdating: Record<string, boolean>;
+  resettingQuota: Record<string, boolean>;
   batchStatusUpdating: boolean;
   fileInputRef: RefObject<HTMLInputElement | null>;
   loadFiles: () => Promise<void>;
@@ -39,6 +40,7 @@ export type UseAuthFilesDataResult = {
   handleDeleteAll: (options: DeleteAllOptions) => void;
   handleDownload: (name: string) => Promise<void>;
   handleStatusToggle: (item: AuthFileItem, enabled: boolean) => Promise<void>;
+  handleResetQuota: (name: string) => void;
   toggleSelect: (name: string) => void;
   selectAllVisible: (visibleFiles: AuthFileItem[]) => void;
   invertVisibleSelection: (visibleFiles: AuthFileItem[]) => void;
@@ -64,6 +66,7 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions): UseAuthFiles
   const [deleting, setDeleting] = useState<string | null>(null);
   const [deletingAll, setDeletingAll] = useState(false);
   const [statusUpdating, setStatusUpdating] = useState<Record<string, boolean>>({});
+  const [resettingQuota, setResettingQuota] = useState<Record<string, boolean>>({});
   const [batchStatusUpdating, setBatchStatusUpdating] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
 
@@ -435,6 +438,46 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions): UseAuthFiles
     [showNotification, t]
   );
 
+  const handleResetQuota = useCallback(
+    (name: string) => {
+      showConfirmation({
+        title: t('auth_files.reset_quota_title', { defaultValue: 'Reset Quota' }),
+        message: t('auth_files.reset_quota_confirm', {
+          name,
+          defaultValue: `Reset quota state for "${name}"? This will clear any quota-exceeded block and make the account available for requests again.`,
+        }),
+        variant: 'primary',
+        confirmText: t('common.confirm'),
+        onConfirm: async () => {
+          setResettingQuota((prev) => ({ ...prev, [name]: true }));
+          try {
+            await authFilesApi.resetQuota(name);
+            showNotification(
+              t('auth_files.reset_quota_success', { name, defaultValue: `Quota reset for "${name}"` }),
+              'success'
+            );
+            await loadFiles();
+            await refreshKeyStats();
+          } catch (err: unknown) {
+            const errorMessage = err instanceof Error ? err.message : '';
+            showNotification(
+              `${t('auth_files.reset_quota_failed', { defaultValue: 'Failed to reset quota' })}: ${errorMessage}`,
+              'error'
+            );
+          } finally {
+            setResettingQuota((prev) => {
+              if (!prev[name]) return prev;
+              const next = { ...prev };
+              delete next[name];
+              return next;
+            });
+          }
+        },
+      });
+    },
+    [loadFiles, refreshKeyStats, showConfirmation, showNotification, t]
+  );
+
   const batchSetStatus = useCallback(
     async (names: string[], enabled: boolean) => {
       if (batchStatusPendingRef.current) return;
@@ -614,6 +657,7 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions): UseAuthFiles
     deleting,
     deletingAll,
     statusUpdating,
+    resettingQuota,
     batchStatusUpdating,
     fileInputRef,
     loadFiles,
@@ -623,6 +667,7 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions): UseAuthFiles
     handleDeleteAll,
     handleDownload,
     handleStatusToggle,
+    handleResetQuota,
     toggleSelect,
     selectAllVisible,
     invertVisibleSelection,

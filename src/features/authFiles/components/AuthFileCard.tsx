@@ -7,6 +7,7 @@ import {
   IconDownload,
   IconInfo,
   IconModelCluster,
+  IconRefreshCw,
   IconSettings,
   IconTrash2,
 } from '@/components/ui/icons';
@@ -41,6 +42,7 @@ export type AuthFileCardProps = {
   resolvedTheme: ResolvedTheme;
   disableControls: boolean;
   deleting: string | null;
+  resettingQuota: Record<string, boolean>;
   statusUpdating: Record<string, boolean>;
   quotaFilterType: QuotaProviderType | null;
   keyStats: KeyStats;
@@ -49,6 +51,7 @@ export type AuthFileCardProps = {
   onDownload: (name: string) => void;
   onOpenPrefixProxyEditor: (file: AuthFileItem) => void;
   onDelete: (name: string) => void;
+  onResetQuota: (name: string) => void;
   onToggleStatus: (file: AuthFileItem, enabled: boolean) => void;
   onToggleSelect: (name: string) => void;
 };
@@ -68,6 +71,7 @@ export function AuthFileCard(props: AuthFileCardProps) {
     resolvedTheme,
     disableControls,
     deleting,
+    resettingQuota,
     statusUpdating,
     quotaFilterType,
     keyStats,
@@ -76,6 +80,7 @@ export function AuthFileCard(props: AuthFileCardProps) {
     onDownload,
     onOpenPrefixProxyEditor,
     onDelete,
+    onResetQuota,
     onToggleStatus,
     onToggleSelect,
   } = props;
@@ -291,6 +296,20 @@ export function AuthFileCard(props: AuthFileCardProps) {
                     disabled={disableControls}
                   >
                     <IconSettings className={styles.actionIcon} size={16} />
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => onResetQuota(file.name)}
+                    className={styles.iconButton}
+                    title={t('auth_files.reset_quota_button', { defaultValue: 'Reset Quota' })}
+                    disabled={disableControls || resettingQuota[file.name] === true}
+                  >
+                    {resettingQuota[file.name] === true ? (
+                      <LoadingSpinner size={14} />
+                    ) : (
+                      <IconRefreshCw className={styles.actionIcon} size={16} />
+                    )}
                   </Button>
                   <Button
                     variant="danger"
