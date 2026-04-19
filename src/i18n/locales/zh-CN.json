@@ -1518,5 +1518,25 @@
     "build_date": "构建时间",
     "version": "管理中心版本",
     "author": "作者"
+  },
+  "role_stats": {
+    "title": "角色 / 仓库统计",
+    "no_data": "暂无按角色划分的使用数据",
+    "filter_role": "角色：",
+    "filter_repo": "仓库：",
+    "filter_tier": "分层：",
+    "filter_all_roles": "所有角色",
+    "filter_all_repos": "所有仓库",
+    "filter_all_tiers": "所有分层",
+    "role": "角色",
+    "repos": "仓库",
+    "tiers": "分层",
+    "slug_breakdown": "别名细分",
+    "slug": "别名",
+    "repo": "仓库",
+    "tier": "分层",
+    "slugs_show": "显示 {{count}} 个别名",
+    "slugs_hide": "隐藏别名",
+    "unparsed_row": "其他（未解析别名）"
   }
 }

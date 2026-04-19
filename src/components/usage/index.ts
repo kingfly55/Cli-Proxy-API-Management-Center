@@ -30,6 +30,9 @@ export type { PriceSettingsCardProps } from './PriceSettingsCard';
 export { CredentialStatsCard } from './CredentialStatsCard';
 export type { CredentialStatsCardProps } from './CredentialStatsCard';
 
+export { RoleStatsCard } from './RoleStatsCard';
+export type { RoleStatsCardProps } from './RoleStatsCard';
+
 export { TokenBreakdownChart } from './TokenBreakdownChart';
 export type { TokenBreakdownChartProps } from './TokenBreakdownChart';
 

@@ -66,6 +66,7 @@ export interface UsageDetail {
     total_tokens: number;
   };
   failed: boolean;
+  original_model?: string;
   __modelName?: string;
   __timestampMs?: number;
 }
@@ -248,6 +249,145 @@ export function filterUsageByTimeRange<T>(
     ...toUsageSummaryFields(totalSummary),
     apis: filteredApis,
   } as T;
+}
+
+export interface RoleRepoTierFilter {
+  role?: string;
+  repo?: string;
+  tier?: string;
+}
+
+const ROLE_REPO_TIER_ANY = '';
+
+/**
+ * Filter usage data to include only requests whose `original_model` slug parses to
+ * the specified role / repo / tier. Requests without `original_model` are excluded
+ * whenever any filter is active. Returns the input unchanged when no filter is set.
+ */
+export function filterUsageByRoleRepoTier<T>(usageData: T, filter: RoleRepoTierFilter): T {
+  const role = (filter.role || ROLE_REPO_TIER_ANY).trim();
+  const repo = (filter.repo || ROLE_REPO_TIER_ANY).trim();
+  const tier = (filter.tier || ROLE_REPO_TIER_ANY).trim();
+  const hasFilter = role !== '' || repo !== '' || tier !== '';
+  if (!hasFilter) {
+    return usageData;
+  }
+
+  const usageRecord = isRecord(usageData) ? usageData : null;
+  const apis = getApisRecord(usageData);
+  if (!usageRecord || !apis) {
+    return usageData;
+  }
+
+  const filteredApis: Record<string, unknown> = {};
+  const totalSummary = createUsageSummary();
+
+  const matches = (detail: Record<string, unknown>): boolean => {
+    const slug =
+      typeof detail.original_model === 'string' ? detail.original_model.trim() : '';
+    if (!slug) return false;
+    const parsed = parseRoleSlug(slug);
+    if (!parsed) return false;
+    if (role && parsed.role !== role) return false;
+    if (repo && parsed.repo !== repo) return false;
+    if (tier && parsed.tier !== tier) return false;
+    return true;
+  };
+
+  Object.entries(apis).forEach(([apiName, apiEntry]) => {
+    if (!isRecord(apiEntry)) return;
+    const models = isRecord(apiEntry.models) ? apiEntry.models : null;
+    if (!models) return;
+
+    const filteredModels: Record<string, unknown> = {};
+    const apiSummary = createUsageSummary();
+    let hasModelData = false;
+    const originalSlugsAgg: Record<string, { total_requests: number; total_tokens: number }> = {};
+
+    Object.entries(models).forEach(([modelName, modelEntry]) => {
+      if (!isRecord(modelEntry)) return;
+      const detailsRaw = Array.isArray(modelEntry.details) ? modelEntry.details : [];
+      const modelSummary = createUsageSummary();
+      const filteredDetails: unknown[] = [];
+
+      detailsRaw.forEach((detail) => {
+        const detailRecord = isRecord(detail) ? detail : null;
+        if (!detailRecord) return;
+        if (!matches(detailRecord)) return;
+        filteredDetails.push(detail);
+        modelSummary.totalRequests += 1;
+        if (detailRecord.failed === true) modelSummary.failureCount += 1;
+        else modelSummary.successCount += 1;
+        const tokens = extractTotalTokens(detailRecord);
+        modelSummary.totalTokens += tokens;
+        const slug = typeof detailRecord.original_model === 'string' ? detailRecord.original_model : '';
+        if (slug) {
+          const entry = originalSlugsAgg[slug] ?? { total_requests: 0, total_tokens: 0 };
+          entry.total_requests += 1;
+          entry.total_tokens += tokens;
+          originalSlugsAgg[slug] = entry;
+        }
+      });
+
+      if (!filteredDetails.length) return;
+
+      filteredModels[modelName] = {
+        ...modelEntry,
+        ...toUsageSummaryFields(modelSummary),
+        details: filteredDetails,
+      };
+      hasModelData = true;
+      apiSummary.totalRequests += modelSummary.totalRequests;
+      apiSummary.successCount += modelSummary.successCount;
+      apiSummary.failureCount += modelSummary.failureCount;
+      apiSummary.totalTokens += modelSummary.totalTokens;
+    });
+
+    if (!hasModelData) return;
+
+    filteredApis[apiName] = {
+      ...apiEntry,
+      ...toUsageSummaryFields(apiSummary),
+      models: filteredModels,
+      original_slugs: originalSlugsAgg,
+    };
+    totalSummary.totalRequests += apiSummary.totalRequests;
+    totalSummary.successCount += apiSummary.successCount;
+    totalSummary.failureCount += apiSummary.failureCount;
+    totalSummary.totalTokens += apiSummary.totalTokens;
+  });
+
+  return {
+    ...usageRecord,
+    ...toUsageSummaryFields(totalSummary),
+    apis: filteredApis,
+  } as T;
+}
+
+/**
+ * Collect all unique role slugs observed in the given usage data, useful for
+ * populating filter dropdowns with only roles that actually have data.
+ */
+export function collectRolesFromUsage(usageData: unknown): string[] {
+  const roles = new Set<string>();
+  const apis = getApisRecord(usageData);
+  if (!apis) return [];
+  Object.values(apis).forEach((apiEntry) => {
+    if (!isRecord(apiEntry)) return;
+    const models = isRecord(apiEntry.models) ? apiEntry.models : null;
+    if (!models) return;
+    Object.values(models).forEach((modelEntry) => {
+      if (!isRecord(modelEntry)) return;
+      const details = Array.isArray(modelEntry.details) ? modelEntry.details : [];
+      details.forEach((detail) => {
+        if (!isRecord(detail)) return;
+        const slug = typeof detail.original_model === 'string' ? detail.original_model : '';
+        const parsed = parseRoleSlug(slug);
+        if (parsed) roles.add(parsed.role);
+      });
+    });
+  });
+  return Array.from(roles).sort();
 }
 
 export const normalizeAuthIndex = (value: unknown) => {
@@ -555,6 +695,7 @@ export function collectUsageDetails(usageData: unknown): UsageDetail[] {
           latency_ms: latencyMs ?? undefined,
           tokens: tokensRaw as unknown as UsageDetail['tokens'],
           failed: detailRaw.failed === true,
+          original_model: typeof detailRaw.original_model === 'string' ? detailRaw.original_model : undefined,
           __modelName: modelName,
           __timestampMs: Number.isNaN(timestampMs) ? 0 : timestampMs,
         });
@@ -1904,4 +2045,46 @@ export function buildDailyCostSeries(
   const data = labels.map((l) => dayMap[l]);
 
   return { labels, data, hasData };
+}
+
+// -----------------------------------------------------------------------------
+// Role-based slug parsing for WebCity cost attribution.
+// Slugs have the shape [REPO-]ROLE-TIER, e.g. "wa-builder-sonnet", "mayor-opus",
+// "th-self-check-haiku". Known repo prefixes are the rig prefixes configured in
+// city.toml; known tiers are the three Claude-family aliases.
+// -----------------------------------------------------------------------------
+
+export const KNOWN_REPO_PREFIXES: ReadonlyArray<string> = ['wa', 'cm', 'th'];
+export const KNOWN_TIERS: ReadonlyArray<string> = ['haiku', 'sonnet', 'opus'];
+
+export interface ParsedRoleSlug {
+  repo: string;
+  role: string;
+  tier: string;
+}
+
+/**
+ * Parse a role slug into (repo, role, tier). Returns null if the slug does not
+ * match the [REPO-]ROLE-TIER format. Role may itself contain hyphens (e.g. "self-check").
+ */
+export function parseRoleSlug(slug: string | null | undefined): ParsedRoleSlug | null {
+  if (!slug) return null;
+  const trimmed = slug.trim();
+  if (!trimmed) return null;
+  const parts = trimmed.split('-');
+  if (parts.length < 2) return null;
+  const tier = parts[parts.length - 1];
+  if (!KNOWN_TIERS.includes(tier)) return null;
+  const remainder = parts.slice(0, -1);
+  let repo = '';
+  let roleParts: string[];
+  if (remainder.length >= 2 && KNOWN_REPO_PREFIXES.includes(remainder[0])) {
+    repo = remainder[0];
+    roleParts = remainder.slice(1);
+  } else {
+    roleParts = remainder;
+  }
+  const role = roleParts.join('-');
+  if (!role) return null;
+  return { repo, role, tier };
 }

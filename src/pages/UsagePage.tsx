@@ -25,6 +25,7 @@ import {
   ModelStatsCard,
   PriceSettingsCard,
   CredentialStatsCard,
+  RoleStatsCard,
   RequestEventsDetailsCard,
   TokenBreakdownChart,
   CostTrendChart,
@@ -38,6 +39,10 @@ import {
   getApiStats,
   getModelStats,
   filterUsageByTimeRange,
+  filterUsageByRoleRepoTier,
+  collectRolesFromUsage,
+  KNOWN_REPO_PREFIXES,
+  KNOWN_TIERS,
   type UsageTimeRange
 } from '@/utils/usage';
 import styles from './UsagePage.module.scss';
@@ -56,8 +61,12 @@ ChartJS.register(
 
 const CHART_LINES_STORAGE_KEY = 'cli-proxy-usage-chart-lines-v1';
 const TIME_RANGE_STORAGE_KEY = 'cli-proxy-usage-time-range-v1';
+const ROLE_FILTER_STORAGE_KEY = 'cli-proxy-usage-role-filter-v1';
+const REPO_FILTER_STORAGE_KEY = 'cli-proxy-usage-repo-filter-v1';
+const TIER_FILTER_STORAGE_KEY = 'cli-proxy-usage-tier-filter-v1';
 const DEFAULT_CHART_LINES = ['all'];
 const DEFAULT_TIME_RANGE: UsageTimeRange = '24h';
+const ANY_FILTER = '__any__';
 const MAX_CHART_LINES = 9;
 const TIME_RANGE_OPTIONS: ReadonlyArray<{ value: UsageTimeRange; labelKey: string }> = [
   { value: 'all', labelKey: 'usage_stats.range_all' },
@@ -115,6 +124,18 @@ const loadTimeRange = (): UsageTimeRange => {
   }
 };
 
+const loadStringFilter = (key: string): string => {
+  try {
+    if (typeof localStorage === 'undefined') {
+      return ANY_FILTER;
+    }
+    const raw = localStorage.getItem(key);
+    return typeof raw === 'string' && raw.length > 0 ? raw : ANY_FILTER;
+  } catch {
+    return ANY_FILTER;
+  }
+};
+
 export function UsagePage() {
   const { t } = useTranslation();
   const isMobile = useMediaQuery('(max-width: 768px)');
@@ -144,6 +165,9 @@ export function UsagePage() {
   // Chart lines state
   const [chartLines, setChartLines] = useState<string[]>(loadChartLines);
   const [timeRange, setTimeRange] = useState<UsageTimeRange>(loadTimeRange);
+  const [roleFilter, setRoleFilter] = useState<string>(() => loadStringFilter(ROLE_FILTER_STORAGE_KEY));
+  const [repoFilter, setRepoFilter] = useState<string>(() => loadStringFilter(REPO_FILTER_STORAGE_KEY));
+  const [tierFilter, setTierFilter] = useState<string>(() => loadStringFilter(TIER_FILTER_STORAGE_KEY));
 
   const timeRangeOptions = useMemo(
     () =>
@@ -154,9 +178,38 @@ export function UsagePage() {
     [t]
   );
 
-  const filteredUsage = useMemo(
-    () => (usage ? filterUsageByTimeRange(usage, timeRange) : null),
-    [usage, timeRange]
+  const filteredUsage = useMemo(() => {
+    if (!usage) return null;
+    const byTime = filterUsageByTimeRange(usage, timeRange);
+    return filterUsageByRoleRepoTier(byTime, {
+      role: roleFilter === ANY_FILTER ? undefined : roleFilter,
+      repo: repoFilter === ANY_FILTER ? undefined : repoFilter,
+      tier: tierFilter === ANY_FILTER ? undefined : tierFilter,
+    });
+  }, [usage, timeRange, roleFilter, repoFilter, tierFilter]);
+
+  const availableRoles = useMemo(() => collectRolesFromUsage(usage), [usage]);
+
+  const roleFilterOptions = useMemo(
+    () => [
+      { value: ANY_FILTER, label: t('role_stats.filter_all_roles') },
+      ...availableRoles.map((r) => ({ value: r, label: r })),
+    ],
+    [availableRoles, t]
+  );
+  const repoFilterOptions = useMemo(
+    () => [
+      { value: ANY_FILTER, label: t('role_stats.filter_all_repos') },
+      ...KNOWN_REPO_PREFIXES.map((r) => ({ value: r, label: r })),
+    ],
+    [t]
+  );
+  const tierFilterOptions = useMemo(
+    () => [
+      { value: ANY_FILTER, label: t('role_stats.filter_all_tiers') },
+      ...KNOWN_TIERS.map((tier) => ({ value: tier, label: tier })),
+    ],
+    [t]
   );
   const hourWindowHours =
     timeRange === 'all' ? undefined : HOUR_WINDOW_BY_TIME_RANGE[timeRange];
@@ -186,6 +239,25 @@ export function UsagePage() {
       // Ignore storage errors.
     }
   }, [timeRange]);
+
+  useEffect(() => {
+    try {
+      if (typeof localStorage === 'undefined') return;
+      localStorage.setItem(ROLE_FILTER_STORAGE_KEY, roleFilter);
+    } catch { /* Ignore storage errors. */ }
+  }, [roleFilter]);
+  useEffect(() => {
+    try {
+      if (typeof localStorage === 'undefined') return;
+      localStorage.setItem(REPO_FILTER_STORAGE_KEY, repoFilter);
+    } catch { /* Ignore storage errors. */ }
+  }, [repoFilter]);
+  useEffect(() => {
+    try {
+      if (typeof localStorage === 'undefined') return;
+      localStorage.setItem(TIER_FILTER_STORAGE_KEY, tierFilter);
+    } catch { /* Ignore storage errors. */ }
+  }, [tierFilter]);
 
   const nowMs = lastRefreshedAt?.getTime() ?? 0;
 
@@ -244,6 +316,39 @@ export function UsagePage() {
               onChange={(value) => setTimeRange(value as UsageTimeRange)}
               className={styles.timeRangeSelectControl}
               ariaLabel={t('usage_stats.range_filter')}
+              fullWidth={false}
+            />
+          </div>
+          <div className={styles.timeRangeGroup}>
+            <span className={styles.timeRangeLabel}>{t('role_stats.filter_role')}</span>
+            <Select
+              value={roleFilter}
+              options={roleFilterOptions}
+              onChange={setRoleFilter}
+              className={styles.timeRangeSelectControl}
+              ariaLabel={t('role_stats.filter_role')}
+              fullWidth={false}
+            />
+          </div>
+          <div className={styles.timeRangeGroup}>
+            <span className={styles.timeRangeLabel}>{t('role_stats.filter_repo')}</span>
+            <Select
+              value={repoFilter}
+              options={repoFilterOptions}
+              onChange={setRepoFilter}
+              className={styles.timeRangeSelectControl}
+              ariaLabel={t('role_stats.filter_repo')}
+              fullWidth={false}
+            />
+          </div>
+          <div className={styles.timeRangeGroup}>
+            <span className={styles.timeRangeLabel}>{t('role_stats.filter_tier')}</span>
+            <Select
+              value={tierFilter}
+              options={tierFilterOptions}
+              onChange={setTierFilter}
+              className={styles.timeRangeSelectControl}
+              ariaLabel={t('role_stats.filter_tier')}
               fullWidth={false}
             />
           </div>
@@ -385,6 +490,13 @@ export function UsagePage() {
         codexConfigs={config?.codexApiKeys || []}
         vertexConfigs={config?.vertexApiKeys || []}
         openaiProviders={config?.openaiCompatibility || []}
+      />
+
+      {/* Role / Repo Stats (WebCity role-scoped slugs) */}
+      <RoleStatsCard
+        usage={filteredUsage}
+        loading={loading}
+        modelPrices={modelPrices}
       />
 
       {/* Price Settings */}
